@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build output (e.g. PyInstaller for a .exe build)
+build/
+dist/
+*.spec
+*.egg-info/
+.eggs/
+
+# Test & lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs (PyShot writes pyshot.log to %TEMP%, but ignore stray ones too)
+*.log
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Windows / OS cruft
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
