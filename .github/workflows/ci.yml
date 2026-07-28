@@ -13,8 +13,9 @@ jobs:
     # time, so the runner needs no display.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # v7: earlier majors run on Node 20, which GitHub has deprecated
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Install dependencies
