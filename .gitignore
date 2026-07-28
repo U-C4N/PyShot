@@ -13,6 +13,9 @@ ENV/
 build/
 dist/
 *.spec
+# ...except the committed build recipe (a trailing comment on a gitignore
+# pattern is NOT a comment, so this negation gets its own line)
+!pyshot.spec
 *.egg-info/
 .eggs/
 

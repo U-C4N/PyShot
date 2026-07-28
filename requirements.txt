@@ -1,0 +1,5 @@
+# PyShot dependencies. Both floors below require Python 3.9+, which is the real
+# minimum for the project — the source itself only needs f-strings.
+mss>=10          # 10.x renamed mss.mss to mss.MSS; pyshot.py handles both names
+Pillow>=11
+pywin32>=306     # win32clipboard, win32gui, win32com.client

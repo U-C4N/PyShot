@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # windows-latest is required, not preferred: pyshot.py loads user32/kernel32
+    # and imports win32clipboard at import time. Nothing calls tk.Tk() at import
+    # time, so the runner needs no display.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        # ruff is pinned: its default rule selection widens between releases, so
+        # an unpinned linter turns an unrelated push into a red build.
+        run: pip install -r requirements.txt pytest ruff==0.15.5
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest -q
