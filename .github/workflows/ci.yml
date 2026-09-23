@@ -10,7 +10,8 @@ jobs:
   test:
     # windows-latest is required, not preferred: pyshot.py loads user32/kernel32
     # and imports win32clipboard at import time. Nothing calls tk.Tk() at import
-    # time, so the runner needs no display.
+    # time; the annotator tests create a hidden Tk root, which a Windows runner
+    # provides without a display (tests/conftest.py fails, not skips, under CI).
     runs-on: windows-latest
     steps:
       # v7: earlier majors run on Node 20, which GitHub has deprecated

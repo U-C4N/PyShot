@@ -31,7 +31,9 @@ _DPI_LEVEL = _set_dpi_awareness()
 # tkinter.messagebox precisely because it needs only ctypes (already imported
 # above), so it still works when tkinter or Pillow is the broken piece.
 try:
+    import functools
     import io
+    import math
     import os
     import queue
     import subprocess
@@ -42,13 +44,14 @@ try:
     import tkinter as tk
     import traceback
     from ctypes import wintypes
+    from dataclasses import dataclass
     from datetime import datetime
     from pathlib import Path
 
     import mss               # raw, lossless screen capture
     import win32clipboard    # clipboard (CF_DIB + PNG + text)
     import win32gui          # window enumeration for click-to-grab
-    from PIL import Image, ImageEnhance, ImageTk
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageTk
 except ImportError as _exc:
     ctypes.windll.user32.MessageBoxW(
         None,
@@ -61,7 +64,7 @@ except ImportError as _exc:
     raise SystemExit(1)
 
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -74,6 +77,7 @@ CAPTURE_TARGET = "cursor"   # "cursor" = the monitor the mouse is on | "primary"
 CAPTURE_MODE = "both"       # "both" | "clipboard" (no file) | "file" (no clipboard)
 WINDOW_SNAP = True          # highlight the window under the cursor; click to grab it
 LOUPE = True                # magnifier + crosshair + pixel coordinate/colour readout
+ANNOTATE = True             # T in the overlay: draw on the capture before it is delivered
 TELL_IF_RUNNING = True      # a second launch says "already running" instead of exiting mutely
 POLL_MS = 40                # poll interval for the hotkey queue (ms)
 RENDER_MS = 15              # refresh interval of the selection drawing (caps at ~60 fps)
@@ -180,6 +184,8 @@ _U32.SetForegroundWindow.argtypes = [wintypes.HWND]
 _U32.SetForegroundWindow.restype = wintypes.BOOL
 _U32.MessageBoxW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.UINT]
 _U32.MessageBoxW.restype = ctypes.c_int
+_U32.GetDoubleClickTime.argtypes = []
+_U32.GetDoubleClickTime.restype = wintypes.UINT
 
 
 class MONITORINFO(ctypes.Structure):
@@ -316,6 +322,166 @@ def parse_hotkey(spec, fallback=(MOD_CONTROL | MOD_SHIFT, 0x48)):
 def pretty_hotkey(spec):
     """'ctrl+shift+h' → 'Ctrl+Shift+H' (for messages shown to the user)."""
     return "+".join(p.strip().title() for p in str(spec).split("+") if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# Annotation — pure layer. A mark is data and Pillow draws it; the overlay and
+# the delivered PNG both come out of these functions, so they cannot disagree.
+# No Win32, no tkinter: tests/test_annotate.py runs all of it headlessly.
+# ---------------------------------------------------------------------------
+
+_MARKER_ALPHA = 102         # Marker opacity, 0-255 (~40 %)
+_FONT_FILES = (Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "segoeui.ttf",
+               "arial.ttf")
+
+
+@dataclass(frozen=True)
+class Mark:
+    """One annotation, in pixel coordinates relative to the captured region.
+
+    kind  "pen" | "marker" | "arrow" | "box" | "fill" | "text" | "blur"
+    pts   pen/marker: the stroke; arrow: (tail, tip); box/fill/blur: two
+          opposite corners, inclusive; text: (top-left,)
+    size  stroke width, font size in px, or the blur's block size
+    """
+    kind: str
+    color: str
+    size: int
+    pts: tuple
+    text: str = ""
+
+
+def _arrow_dims(size):
+    """(head length, head half-width) for a stroke width — shared with the Tk preview."""
+    return 3 * size + 8, 1.5 * size + 4
+
+
+def arrow_head(x0, y0, x1, y1, size):
+    """(tip, left, right) of the head of an arrow from (x0, y0) to (x1, y1).
+
+    None for a zero-length arrow, which has no direction to point in. The head
+    never reaches back past the tail, so a very short arrow is all head.
+    """
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    if length < 1:
+        return None
+    head, half = _arrow_dims(size)
+    head = min(head, length)
+    ux, uy = dx / length, dy / length
+    bx, by = x1 - ux * head, y1 - uy * head          # centre of the head's base
+    return ((x1, y1), (bx - uy * half, by + ux * half), (bx + uy * half, by - ux * half))
+
+
+def _box(pts):
+    """Two opposite corners, in either order → (left, top, right, bottom)."""
+    (xa, ya), (xb, yb) = pts[0], pts[-1]
+    return min(xa, xb), min(ya, yb), max(xa, xb), max(ya, yb)
+
+
+def pixelate(img, box, block):
+    """Pixelate the EXCLUSIVE box of img in place, in block × block squares.
+
+    The box is clamped to the image, so one hanging off an edge is fine and an
+    empty one is a no-op. Squares are aligned to the box's top-left corner.
+    """
+    x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
+    x1, y1 = min(img.width, int(box[2])), min(img.height, int(box[3]))
+    if x1 <= x0 or y1 <= y0:
+        return
+    block = max(1, int(block))
+    w, h = x1 - x0, y1 - y0
+    small = img.crop((x0, y0, x1, y1)).resize((-(-w // block), -(-h // block)), Image.BOX)
+    big = small.resize((small.width * block, small.height * block), Image.NEAREST)
+    img.paste(big.crop((0, 0, w, h)), (x0, y0))
+
+
+@functools.lru_cache(maxsize=16)
+def _font(size):
+    """Segoe UI at `size` px, else Arial, else Pillow's own font. Never raises."""
+    for name in _FONT_FILES:
+        try:
+            return ImageFont.truetype(str(name), size)
+        except Exception:       # a missing file, or a Pillow built without FreeType
+            continue
+    try:
+        return ImageFont.load_default(size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _stroke(draw, pts, fill, width):
+    # Pillow has no round line caps: joint="curve" rounds the corners, a disc
+    # rounds each end, and a one-point stroke (a click) is just that disc.
+    if len(pts) > 1:
+        draw.line(pts, fill=fill, width=width, joint="curve")
+    r = (width - 1) / 2
+    for x, y in (pts[0], pts[-1]):
+        if r:
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=fill)
+        else:
+            draw.point((x, y), fill=fill)   # a zero-radius ellipse draws nothing
+
+
+def _draw_mark(img, mark):
+    """Draw one mark onto img IN PLACE (apply_mark is the copying version)."""
+    size = max(1, int(mark.size))
+    draw = ImageDraw.Draw(img)
+    kind, pts = mark.kind, mark.pts
+    if kind == "pen":
+        _stroke(draw, pts, mark.color, size)
+    elif kind == "marker":
+        # Stroked at full strength into a mask and blended ONCE, so the places
+        # where a stroke crosses itself do not come out darker. Only the
+        # stroke's own neighbourhood is touched: undo replays every mark, and a
+        # full-size mask per Marker made 20 strokes on a 4K region take ~0.6 s.
+        pad = size // 2 + 1
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        x0, y0 = max(0, int(min(xs)) - pad), max(0, int(min(ys)) - pad)
+        x1 = min(img.width, int(max(xs)) + pad + 1)
+        y1 = min(img.height, int(max(ys)) + pad + 1)
+        if x1 > x0 and y1 > y0:
+            mask = Image.new("L", (x1 - x0, y1 - y0), 0)
+            _stroke(ImageDraw.Draw(mask), [(x - x0, y - y0) for x, y in pts],
+                    _MARKER_ALPHA, size)
+            img.paste(Image.new("RGB", mask.size, mark.color), (x0, y0), mask)
+    elif kind == "arrow":
+        (x0, y0), (x1, y1) = pts[0], pts[-1]
+        head = arrow_head(x0, y0, x1, y1, size)
+        if head is not None:
+            tip, left, right = head
+            neck = ((left[0] + right[0]) / 2, (left[1] + right[1]) / 2)
+            _stroke(draw, [(x0, y0), neck], mark.color, size)
+            draw.polygon([tip, left, right], fill=mark.color)
+    elif kind == "box":
+        x0, y0, x1, y1 = _box(pts)
+        # Pillow grows an outline inward; widening the box by half a stroke
+        # centres the line on the edge the user dragged, as Tk's preview does.
+        h = size // 2
+        draw.rectangle((x0 - h, y0 - h, x1 + h, y1 + h), outline=mark.color, width=size)
+    elif kind == "fill":
+        draw.rectangle(_box(pts), fill=mark.color)
+    elif kind == "text":
+        if mark.text:
+            draw.multiline_text(pts[0], mark.text, fill=mark.color, font=_font(size))
+    elif kind == "blur":
+        x0, y0, x1, y1 = _box(pts)
+        pixelate(img, (x0, y0, x1 + 1, y1 + 1), size)
+
+
+def apply_mark(img, mark):
+    """A copy of img with one mark drawn on it; img itself is never modified."""
+    out = img.copy()
+    _draw_mark(out, mark)
+    return out
+
+
+def render_marks(base, marks):
+    """base with every mark drawn in order: the same result as chaining apply_mark."""
+    out = base.copy()
+    for mark in marks:
+        _draw_mark(out, mark)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +968,393 @@ def _startup_dialog():
         root.destroy()
 
 
+# ---------------------------------------------------------------------------
+# Annotation — edit phase (Tk). The Annotator owns the toolbar and the live
+# preview; every committed mark goes through apply_mark(), so the region on
+# screen is always exactly the image that on_done() delivers.
+# ---------------------------------------------------------------------------
+
+ANNOT_ACCENT = "#ff9f0a"    # annotation mode's colour: outline, active tool, Done
+_PALETTE = ("#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#000000", "#ffffff")
+# tool: (default, min, max, wheel step) in 96-DPI pixels
+_TOOL_SIZES = {"pen": (4, 1, 30, 1), "marker": (18, 6, 60, 2), "arrow": (4, 1, 30, 1),
+               "box": (3, 1, 30, 1), "text": (20, 10, 96, 2), "blur": (12, 6, 48, 2)}
+_TOOLBAR_ROWS = (("pen", "marker"), ("arrow", "box"), ("text", "blur"),
+                 ("color0", "color1"), ("color2", "color3"), ("color4", "color5"),
+                 ("size",), ("undo", "cancel"), ("done",))
+_ANNOT_ON_HINT = "Annotate ON: select an area to draw on  •  T: off  •  Esc: cancel"
+_ANNOT_HELP = ("Enter: done  •  Ctrl+Z: undo  •  wheel: size  •  "
+               "Shift+box: solid  •  Esc: cancel")
+_TK_SHIFT = 0x0001
+# Control (0x0004) and Alt (0x20000) in a Tk event.state on Windows. Not Mod1
+# (0x0008): Tk reports NumLock there, and masking it made T and C do nothing
+# whenever NumLock was on.
+_TK_CTRL_ALT = 0x0004 | 0x20000
+
+
+def _ui_scale(widget):
+    """System DPI / 96, never below 1: the factor for the toolbar and tool sizes."""
+    try:
+        return max(1.0, widget.winfo_fpixels("1i") / 96.0)
+    except tk.TclError:
+        return 1.0
+
+
+class Annotator:
+    """The edit phase: a toolbar beside the region and marks drawn inside it.
+
+    Everything it puts on the canvas is tagged "annot". It schedules no after()
+    timers, so tearing it down can never leave one armed on a destroyed widget.
+    """
+
+    def __init__(self, cv, box, base, on_done, on_cancel, scale=1.0):
+        self.cv = cv
+        self.box = box                  # EXCLUSIVE (x0, y0, x1, y1), canvas coordinates
+        self.base = base                # the clean region; undo replays onto it
+        self.on_done = on_done
+        self.on_cancel = on_cancel
+        self.scale = scale
+        self.marks = []
+        self.render = base.copy()       # base + marks: what is shown and what is delivered
+        self.photo = None
+        self.tool = "pen"
+        self.color = _PALETTE[0]
+        self.sizes = {tool: self._px(spec[0]) for tool, spec in _TOOL_SIZES.items()}
+        self.preview = None             # canvas item of the stroke being dragged
+        self.points = []                # its canvas coordinates
+        self.text_id = None             # canvas item of the text being typed
+        self.text_at = None             # its region-relative top-left
+        self.text = ""
+        self.buttons = []               # (x0, y0, x1, y1, action) toolbar hit boxes
+        self.bar = (0, 0, 0, 0)
+        self._cursor = None
+        self._wheel = 0                 # wheel delta not yet turned into a size step
+        self.img_id = cv.create_image(box[0], box[1], anchor="nw", tags="annot")
+        self._refresh()
+        self._draw_help()
+        self._draw_toolbar()
+
+    @property
+    def typing(self):
+        return self.text_id is not None
+
+    # ---- geometry ----
+
+    def _px(self, value):
+        return max(1, round(value * self.scale))
+
+    def _in_region(self, x, y):
+        x0, y0, x1, y1 = self.box
+        return x0 <= x < x1 and y0 <= y < y1
+
+    def _in_bar(self, x, y):
+        x0, y0, x1, y1 = self.bar
+        return x0 <= x < x1 and y0 <= y < y1
+
+    def _clamp(self, x, y):
+        x0, y0, x1, y1 = self.box
+        return min(max(x, x0), x1 - 1), min(max(y, y0), y1 - 1)
+
+    def _rel(self, pts):
+        return tuple((x - self.box[0], y - self.box[1]) for x, y in pts)
+
+    # ---- mouse ----
+
+    def on_press(self, e):
+        if self._in_bar(e.x, e.y):
+            self._click(self._hit(e.x, e.y))
+            return
+        self._commit_text()             # any other click ends the text being typed
+        if not self._in_region(e.x, e.y):
+            return
+        x, y = self._clamp(e.x, e.y)
+        if self.tool == "text":
+            self._start_text(x, y)
+            return
+        self.points = [(x, y)]
+        self.preview = self._new_preview(x, y, e.state)
+
+    def on_drag(self, e):
+        if self.preview is None:
+            return
+        x, y = self._clamp(e.x, e.y)
+        if self.tool in ("pen", "marker"):
+            if (x, y) != self.points[-1]:
+                self.points.append((x, y))
+        else:
+            self.points[1:] = [(x, y)]
+        flat = [c for p in self.points for c in p]
+        if len(flat) == 2:
+            flat *= 2                   # a Tk line needs at least two points
+        self.cv.coords(self.preview, *flat)
+        if self.tool == "box":
+            self.cv.itemconfigure(self.preview,
+                                  fill=self.color if e.state & _TK_SHIFT else "")
+
+    def on_release(self, e):
+        if self.preview is None:
+            return
+        self.on_drag(e)
+        self.cv.delete(self.preview)
+        pts, self.preview, self.points = self._rel(self.points), None, []
+        kind = self.tool
+        if kind == "box" and e.state & _TK_SHIFT:
+            kind = "fill"
+        if kind not in ("pen", "marker"):          # for pen and marker a click is a dot
+            (xa, ya), (xb, yb) = pts[0], pts[-1]
+            if kind == "arrow" and math.hypot(xb - xa, yb - ya) < 4:
+                return                  # a click, not an arrow
+            if kind != "arrow" and (abs(xb - xa) < 2 or abs(yb - ya) < 2):
+                return                  # nothing to box or blur
+        self._commit(Mark(kind, self.color, self.sizes[self.tool], pts))
+
+    def on_motion(self, e):
+        cursor = "arrow" if self._in_bar(e.x, e.y) else (
+            "xterm" if self.tool == "text" else "crosshair")
+        if cursor != self._cursor:
+            self._cursor = cursor
+            self.cv.configure(cursor=cursor)
+
+    def on_wheel(self, e):
+        # A size step is one notch (a delta of 120), however many events it
+        # arrives in: precision touchpads send many small deltas.
+        self._wheel += e.delta
+        notches = int(self._wheel / 120)        # truncates toward zero
+        if not notches:
+            return
+        self._wheel -= notches * 120
+        _default, lo, hi, step = _TOOL_SIZES[self.tool]
+        size = self.sizes[self.tool] + notches * step
+        self.sizes[self.tool] = min(max(size, self._px(lo)), self._px(hi))
+        if self.typing:
+            self.cv.itemconfigure(self.text_id, font=self._text_font())
+        self._draw_toolbar()
+
+    # ---- keys ----
+
+    def on_key(self, e):
+        """A key with no binding of its own: only typing uses these."""
+        if not self.typing:
+            return
+        if e.keysym == "BackSpace":
+            self.text = self.text[:-1]
+        elif e.char and e.char.isprintable():
+            self.text += e.char
+        else:
+            return
+        self._show_text()
+
+    def on_return(self, e):
+        if not self.typing:
+            self.finish()
+        elif e.state & _TK_SHIFT:
+            self.text += "\n"
+            self._show_text()
+        else:
+            self._commit_text()
+
+    def undo(self, e=None):
+        if self.typing:
+            self._drop_text()           # first take back the unfinished text
+            return
+        if not self.marks:
+            return
+        mark = self.marks.pop()
+        try:
+            self.render = render_marks(self.base, self.marks)
+        except Exception:
+            _log_error()
+            self.marks.append(mark)     # keep the list and the screen in step
+            return
+        self._refresh()
+
+    def end_text(self):
+        self._commit_text()
+
+    def finish(self):
+        self._commit_text()
+        self.on_done(self.render)
+
+    def destroy(self):
+        try:
+            self.cv.delete("annot")
+        except tk.TclError:
+            pass                        # the canvas is already gone
+        self.photo = None
+
+    # ---- text ----
+
+    def _text_font(self):
+        return ("Segoe UI", -self.sizes["text"])      # negative = pixels, as in Pillow
+
+    def _start_text(self, x, y):
+        self.text_at = (x - self.box[0], y - self.box[1])
+        self.text = ""
+        self.text_id = self.cv.create_text(x, y, anchor="nw", fill=self.color,
+                                           font=self._text_font(), tags="annot")
+        self._show_text()
+
+    def _show_text(self):
+        self.cv.itemconfigure(self.text_id, text=self.text + "|")     # "|" is the caret
+
+    def _drop_text(self):
+        if self.text_id is not None:
+            self.cv.delete(self.text_id)
+        self.text_id, self.text_at, self.text = None, None, ""
+
+    def _commit_text(self):
+        if not self.typing:
+            return
+        text, at = self.text, self.text_at
+        self._drop_text()
+        if text.strip():
+            self._commit(Mark("text", self.color, self.sizes["text"], (at,), text))
+
+    # ---- marks and the region image ----
+
+    def _commit(self, mark):
+        try:
+            self.render = apply_mark(self.render, mark)
+        except Exception:
+            _log_error()                # a mark that cannot be drawn is dropped
+            return
+        self.marks.append(mark)
+        self._refresh()
+
+    def _refresh(self):
+        self.photo = ImageTk.PhotoImage(self.render)
+        self.cv.itemconfigure(self.img_id, image=self.photo)
+
+    def _new_preview(self, x, y, state):
+        cv, colour, w, tool = self.cv, self.color, self.sizes[self.tool], self.tool
+        if tool in ("pen", "marker"):
+            return cv.create_line(x, y, x, y, fill=colour, width=w, capstyle="round",
+                                  joinstyle="round", tags="annot")
+        if tool == "arrow":
+            head, half = _arrow_dims(w)
+            return cv.create_line(x, y, x, y, fill=colour, width=w, arrow="last",
+                                  arrowshape=(head, head, max(1, half - w / 2)), tags="annot")
+        if tool == "box":
+            return cv.create_rectangle(x, y, x, y, outline=colour, width=w,
+                                       fill=colour if state & _TK_SHIFT else "", tags="annot")
+        return cv.create_rectangle(x, y, x, y, outline="#ffffff", dash=(4, 4), tags="annot")
+
+    # ---- toolbar and key help ----
+
+    def _hit(self, x, y):
+        for x0, y0, x1, y1, action in self.buttons:
+            if x0 <= x < x1 and y0 <= y < y1:
+                return action
+        return None
+
+    def _click(self, action):
+        if action == "undo":
+            self.undo()
+        elif action == "cancel":
+            self.on_cancel()
+        elif action == "done":
+            self.finish()
+        else:
+            self._commit_text()         # like any other click
+            if action in _TOOL_SIZES:
+                self.tool = action
+                self._cursor = None     # pick the cursor again on the next motion
+            elif action is not None and action.startswith("color"):
+                self.color = _PALETTE[int(action[5:])]
+            else:
+                return                  # the size label or the bar's background
+            self._draw_toolbar()
+
+    def _toolbar_origin(self, tw, th):
+        x0, y0, x1, _y1 = self.box
+        width, height = int(self.cv["width"]), int(self.cv["height"])
+        gap = self._px(8)
+        if x1 + gap + tw <= width:
+            x = x1 + gap                # right of the region
+        elif x0 - gap - tw >= 0:
+            x = x0 - gap - tw           # left of it
+        else:
+            x = max(0, x1 - gap - tw)   # inside its right edge
+        return x, min(max(0, y0), max(0, height - th))
+
+    def _draw_toolbar(self):
+        cv = self.cv
+        cell, pad = self._px(32), self._px(4)
+        tw = 2 * cell + 3 * pad
+        th = len(_TOOLBAR_ROWS) * (cell + pad) + pad
+        x, y = self._toolbar_origin(tw, th)
+        cv.delete("annot-bar")
+        self.bar = (x, y, x + tw, y + th)
+        self.buttons = []
+        cv.create_rectangle(x, y, x + tw, y + th, fill="#202020", outline="#3a3a3a",
+                            tags=("annot", "annot-bar"))
+        for r, row in enumerate(_TOOLBAR_ROWS):
+            by = y + pad + r * (cell + pad)
+            for c, action in enumerate(row):
+                bw = cell if len(row) == 2 else tw - 2 * pad
+                self._draw_button(action, x + pad + c * (cell + pad), by, bw, cell)
+
+    def _draw_button(self, action, x, y, w, h):
+        cv, tags = self.cv, ("annot", "annot-bar")
+        fg, m, lw = "#e0e0e0", self._px(8), self._px(2)
+        cx, cy = x + w / 2, y + h / 2
+        if action == "size":            # a label, not a button
+            cv.create_text(cx, cy, text=f"{self.sizes[self.tool]} px", fill=fg,
+                           font=("Segoe UI", -self._px(12)), tags=tags)
+            return
+        lit = action == self.tool or action == "done"
+        cv.create_rectangle(x, y, x + w, y + h, outline="",
+                            fill=ANNOT_ACCENT if lit else "#2c2c2c", tags=tags)
+        self.buttons.append((x, y, x + w, y + h, action))
+        x0, y0, x1, y1 = x + m, y + m, x + w - m, y + h - m
+        if action == "pen":
+            cv.create_line(x0, y1, x0 + (x1 - x0) * 0.35, y0, x0 + (x1 - x0) * 0.65, y1,
+                           x1, y0, fill=fg, width=lw, smooth=True, tags=tags)
+        elif action == "marker":
+            cv.create_line(x0, cy, x1, cy, fill="#ffcc00", width=self._px(8), tags=tags)
+        elif action == "arrow":
+            cv.create_line(x0, y1, x1, y0, fill=fg, width=lw, arrow="last",
+                           arrowshape=(self._px(8), self._px(8), self._px(4)), tags=tags)
+        elif action == "box":
+            cv.create_rectangle(x0, y0 + lw, x1, y1 - lw, outline=fg, width=lw, tags=tags)
+        elif action == "text":
+            cv.create_text(cx, cy, text="T", fill=fg, tags=tags,
+                           font=("Segoe UI", -self._px(18), "bold"))
+        elif action == "blur":
+            q = (x1 - x0) / 3
+            for i in range(3):
+                for j in range(3):
+                    cv.create_rectangle(x0 + i * q, y0 + j * q, x0 + (i + 1) * q,
+                                        y0 + (j + 1) * q, outline="", tags=tags,
+                                        fill="#9a9a9a" if (i + j) % 2 else "#5a5a5a")
+        elif action.startswith("color"):
+            colour = _PALETTE[int(action[5:])]
+            chosen = colour == self.color
+            ring = self._px(3)
+            cv.create_rectangle(x + ring, y + ring, x + w - ring, y + h - ring, fill=colour,
+                                outline="#ffffff" if chosen else "#3a3a3a",
+                                width=ring if chosen else 1, tags=tags)
+        else:                           # undo / cancel / done: Segoe UI Symbol glyphs
+            glyph = {"undo": "↶", "cancel": "✕", "done": "✓"}[action]
+            cv.create_text(cx, cy, text=glyph, tags=tags,
+                           fill="#ffffff" if action == "done" else fg,
+                           font=("Segoe UI Symbol", -self._px(18)))
+
+    def _draw_help(self):
+        cv = self.cv
+        width, height = int(cv["width"]), int(cv["height"])
+        band = self._px(56)
+        _x0, y0, _x1, y1 = self.box
+        if y0 >= band:
+            y = band // 2               # at the top, where the select-phase hint was
+        elif y1 <= height - band:
+            y = height - band // 2      # the region covers the top: use the bottom
+        else:
+            return                      # it covers both: no room for the help line
+        cv.create_text(width // 2, y, text=_ANNOT_HELP, fill="#e0e0e0",
+                       font=("Segoe UI", 12), tags="annot")
+
+
 class PyShot:
     def __init__(self, root, hotkeys):
         self.root = root
@@ -824,6 +1377,10 @@ class PyShot:
         self._drawn = None
         self._cursor = None
         self._snap_at_press = None
+        self.annotate = False       # T pressed: release opens the Annotator instead of saving
+        self.editor = None          # the Annotator, while the edit phase is on screen
+        self._hint_text = ""
+        self._ignore_press_until = 0.0  # see _begin_edit: a double-click's second half
 
     # ---- capture flow (always called from the main/tkinter thread) ----
 
@@ -881,10 +1438,14 @@ class PyShot:
             hint += "  •  click a window to grab it"
         if LOUPE:
             hint += "  •  C: copy pixel colour"
+        if ANNOTATE:
+            hint += "  •  T: annotate"
         hint += "  •  Esc / right-click: cancel"
+        self._hint_text = hint
         self.hint_id = cv.create_text(w // 2, 28, text=hint,
                                       fill="#e0e0e0", font=("Segoe UI", 12))
 
+        self.annotate = False
         self.start = None
         self.ph_sel = None
         self.ph_loupe = None
@@ -921,10 +1482,13 @@ class PyShot:
         cv.bind("<B1-Motion>", self._on_move)
         cv.bind("<ButtonRelease-1>", self._on_release)
         cv.bind("<Motion>", self._on_hover)
-        top.bind("<Escape>", self._cancel)
+        top.bind("<Escape>", self.escape)
         top.bind("<Button-3>", self._cancel)
         top.bind("<KeyPress-c>", self._copy_colour)
         top.bind("<KeyPress-C>", self._copy_colour)
+        if ANNOTATE:
+            top.bind("<KeyPress-t>", self._toggle_annotate)
+            top.bind("<KeyPress-T>", self._toggle_annotate)
         # Alt+F4 would otherwise let Tk destroy the overlay behind our back,
         # leaving active=True and every later hotkey a no-op.
         top.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -1016,8 +1580,8 @@ class PyShot:
 
     def _render(self):
         self._render_job = None
-        if self.cv is None or self.img is None:
-            return
+        if self.cv is None or self.img is None or self.editor is not None:
+            return              # (in the edit phase the Annotator owns the canvas)
         self._draw_selection(self._pending)
         self._draw_loupe(self._cursor)
 
@@ -1042,8 +1606,9 @@ class PyShot:
         # live size label — place it first, then re-clamp using its real width so
         # it doesn't overflow the edge (the font can grow with DPI)
         iw, ih = self.img.size
+        mode = "  · annotate" if self.annotate else ""
         cv.itemconfigure(self.size_txt_id, state="normal",
-                         text=f" {x1 - x0} × {y1 - y0} px ")
+                         text=f" {x1 - x0} × {y1 - y0} px{mode} ")
         ty = y0 - 24 if y0 >= 28 else y1 + 6
         cv.coords(self.size_txt_id, x0, ty)
         bb = cv.bbox(self.size_txt_id)
@@ -1114,13 +1679,17 @@ class PyShot:
             return
         box = sel_box(self.start, e.x, e.y, *self.img.size)
         self.start = None
-        if (box[2] - box[0]) < MIN_SEL or (box[3] - box[1]) < MIN_SEL:
+        clicked = (box[2] - box[0]) < MIN_SEL or (box[3] - box[1]) < MIN_SEL
+        if clicked:
             # Not a drag but a click: grab the window under it, or treat it as
             # an accidental click and cancel.
             box = self._snap_at_press
             if box is None:
                 self._cancel()
                 return
+        if self.annotate:
+            self._begin_edit(box, clicked)
+            return
         region = self.img.crop(box)
         self._close_overlay()
         self.root.update_idletasks()  # make the overlay disappear instantly, then save
@@ -1147,6 +1716,91 @@ class PyShot:
             bits.append("copied to clipboard" if ok else "clipboard copy failed!")
         self._toast("  •  ".join(bits) or "✓ Captured", path=path)
 
+    # ---- the edit phase (annotation mode) ----
+
+    def _begin_edit(self, box, clicked=False):
+        """Hand the overlay's canvas to an Annotator for the selected region.
+
+        clicked: the edit phase was opened by a click on a window rather than a
+        drag, so the next press may be the second half of a double-click.
+        """
+        cv, top = self.cv, self.top
+        if self._render_job is not None:
+            try:
+                self.root.after_cancel(self._render_job)
+            except tk.TclError:
+                pass
+            self._render_job = None
+        # A window click may not have been drawn yet: show the final box, and
+        # take the select-phase furniture off the screen.
+        self._pending = box
+        self._draw_selection(box)
+        for i in (self.hint_id, self.guide_h_id, self.guide_v_id, self.loupe_img_id,
+                  self.loupe_frame_id, self.loupe_pix_id, self.loupe_bg_id,
+                  self.loupe_txt_id):
+            cv.itemconfigure(i, state="hidden")
+        self.win_rects = []
+        self.editor = ed = Annotator(cv, box, self.img.crop(box), on_done=self._finish_edit,
+                                     on_cancel=self._cancel, scale=_ui_scale(top))
+        for i in (self.rect_id, self.size_bg_id, self.size_txt_id):
+            cv.tag_raise(i)             # the outline and the size stay visible
+        cv.tag_raise("annot-bar")
+        # The Annotator draws the region itself; the select-phase copy underneath
+        # would only hold memory (tens of MB for a 4K region).
+        cv.itemconfigure(self.sel_img_id, image="")
+        self.ph_sel = None
+        # The press that ended the selection gave the overlay keyboard focus, so
+        # Tk's own <Escape> binding covers Esc from here on. Keeping the global
+        # hotkey through a drawing session that can last minutes would swallow
+        # Esc in every other app (on another monitor, say) and cancel the drawing.
+        if self._esc_active:
+            self.hotkeys.release_esc()
+            self._esc_active = False
+        # A double-click on a window would otherwise open the editor with its
+        # first click and leave a pen dot with its second.
+        self._ignore_press_until = (
+            time.monotonic() + _U32.GetDoubleClickTime() / 1000 if clicked else 0.0)
+        cv.bind("<ButtonPress-1>", self._edit_press)
+        cv.bind("<B1-Motion>", ed.on_drag)
+        cv.bind("<ButtonRelease-1>", ed.on_release)
+        cv.bind("<Motion>", ed.on_motion)
+        # Tk runs only the MOST specific binding for a key: while <KeyPress-t>
+        # and <KeyPress-c> exist, typing "t" or "c" into a text mark would toggle
+        # the mode, or copy a colour and close the overlay, instead of typing.
+        for seq in ("<KeyPress-t>", "<KeyPress-T>", "<KeyPress-c>", "<KeyPress-C>"):
+            top.unbind(seq)
+        top.bind("<KeyPress>", ed.on_key)
+        top.bind("<Return>", ed.on_return)
+        top.bind("<KP_Enter>", ed.on_return)
+        top.bind("<Control-z>", ed.undo)
+        top.bind("<Control-Z>", ed.undo)
+        top.bind("<MouseWheel>", ed.on_wheel)
+        # Right-click cancels while selecting; here it would throw the drawing away.
+        top.bind("<Button-3>", lambda _e: None)
+
+    def _finish_edit(self, image):
+        self._close_overlay()
+        self.root.update_idletasks()    # make the overlay disappear instantly, then save
+        self._deliver(image)
+
+    def _edit_press(self, e):
+        # Ignore the second half of the double-click that opened the editor.
+        if time.monotonic() >= self._ignore_press_until:
+            self.editor.on_press(e)
+
+    def _toggle_annotate(self, event=None):
+        if self.cv is None or self.editor is not None:
+            return
+        if event is not None and event.state & _TK_CTRL_ALT:
+            return                      # Ctrl+T / Alt+T belong to other apps, as with C
+        self.annotate = not self.annotate
+        self.cv.itemconfigure(self.rect_id,
+                              outline=ANNOT_ACCENT if self.annotate else "#3aa3ff")
+        self.cv.itemconfigure(self.hint_id,
+                              text=_ANNOT_ON_HINT if self.annotate else self._hint_text)
+        self._drawn = None              # the size label names the mode: draw it again
+        self._schedule_render()
+
     def _copy_colour(self, event=None):
         if not LOUPE or self.img is None or self._cursor is None:
             return
@@ -1156,7 +1810,7 @@ class PyShot:
         # means "copy" everywhere else, and honouring it here would silently
         # throw the pending capture away and overwrite the clipboard with a
         # colour string. Only a bare 'c' picks.
-        if event is not None and event.state & (0x0004 | 0x0008 | 0x20000):
+        if event is not None and event.state & _TK_CTRL_ALT:
             return
         iw, ih = self.img.size
         cx = min(max(self._cursor[0], 0), iw - 1)
@@ -1169,10 +1823,21 @@ class PyShot:
         self._toast(f"✓ {hexcol} copied to clipboard" if ok
                     else f"✗ {hexcol} — clipboard copy failed!")
 
+    def escape(self, event=None):
+        """Esc, from the Tk binding or the global hotkey: end a text mark, else cancel."""
+        if self.editor is not None and self.editor.typing:
+            self.editor.end_text()
+        else:
+            self._cancel()
+
     def _cancel(self, event=None):
         self._close_overlay()
 
     def _close_overlay(self):
+        if self.editor is not None:
+            self.editor.destroy()
+            self.editor = None
+        self.annotate = False
         if self._render_job is not None:
             try:
                 self.root.after_cancel(self._render_job)
@@ -1297,7 +1962,7 @@ def main():
             app.start_capture()
         elif kind == "cancel":
             if app.active:
-                app._cancel()
+                app.escape()
         elif kind == "hotkey_failed":
             names = " and ".join(f"{what} ({pretty_hotkey(spec)})" for what, spec in payload)
             app._toast(f"⚠ Already used by another app: the {names} hotkey"
