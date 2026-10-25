@@ -13,17 +13,35 @@ jobs:
     # time; the annotator tests create a hidden Tk root, which a Windows runner
     # provides without a display (tests/conftest.py fails, not skips, under CI).
     runs-on: windows-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
     steps:
       # v7: earlier majors run on Node 20, which GitHub has deprecated
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python }}
       - name: Install dependencies
         # ruff is pinned: its default rule selection widens between releases, so
         # an unpinned linter turns an unrelated push into a red build.
-        run: pip install -r requirements.txt pytest ruff==0.15.5
+        run: pip install --require-hashes -r requirements-dev.lock
       - name: Lint
         run: ruff check .
       - name: Test
         run: pytest -q
+      - name: Native tests
+        if: matrix.python == '3.13'
+        run: cargo test --locked --manifest-path native/pyshot-recorder/Cargo.toml
+      - name: Build Windows bundle
+        if: matrix.python == '3.13'
+        run: ./scripts/build.ps1
+      - name: Validate packaged stdio
+        if: matrix.python == '3.13'
+        run: python scripts/smoke_mcp.py dist/PyShot-3.0.0-win-x64/pyshot-mcp.exe
+      - name: Upload Windows bundle
+        if: matrix.python == '3.13'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyShot-3.0.0-win-x64
+          path: dist/PyShot-3.0.0-win-x64.zip

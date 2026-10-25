@@ -1,25 +1,5 @@
 import ctypes
-
-
-def _set_dpi_awareness():
-    # Returns which level was actually reached, so a blurry capture on a HiDPI
-    # display has something to blame in the log.
-    try:  # Windows 10 1703+ : Per-Monitor v2
-        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
-            return "per-monitor-v2"
-    except (AttributeError, OSError):
-        pass
-    try:  # Windows 8.1+ : Per-Monitor
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return "per-monitor"
-    except (AttributeError, OSError):
-        pass
-    try:  # Vista+ : System aware
-        ctypes.windll.user32.SetProcessDPIAware()
-        return "system"
-    except (AttributeError, OSError):
-        pass
-    return "none"
+from pyshot_core.windows import set_dpi_awareness as _set_dpi_awareness
 
 
 _DPI_LEVEL = _set_dpi_awareness()
@@ -53,6 +33,9 @@ try:
     import win32gui          # window enumeration for click-to-grab
     from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageTk
 except ImportError as _exc:
+    import sys
+    if "--background" in sys.argv:
+        raise SystemExit(f"PyShot dependency missing: {_exc}")
     ctypes.windll.user32.MessageBoxW(
         None,
         "PyShot could not start: missing dependency "
@@ -64,7 +47,9 @@ except ImportError as _exc:
     raise SystemExit(1)
 
 
-__version__ = "2.1.0"
+from pyshot_core import __version__
+from pyshot_core.capture import grab as _grab
+from pyshot_core.output import desktop_dir as _desktop_dir, next_free_path
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -73,6 +58,7 @@ HOTKEY_CAPTURE = "ctrl+shift+h"   # e.g. "printscreen", "ctrl+alt+f9", "ctrl+shi
                                   # (Win+<key> combos reserved by the shell, like
                                   #  win+s, cannot be registered by any app)
 HOTKEY_QUIT = "ctrl+shift+q"
+HOTKEY_RECORD = "ctrl+shift+r"
 CAPTURE_TARGET = "cursor"   # "cursor" = the monitor the mouse is on | "primary" | "all"
 CAPTURE_MODE = "both"       # "both" | "clipboard" (no file) | "file" (no clipboard)
 WINDOW_SNAP = True          # highlight the window under the cursor; click to grab it
@@ -230,7 +216,7 @@ WS_EX_TRANSPARENT = 0x00000020
 # The desktop host windows plus the taskbars: never snap targets (see _window_rects)
 _SHELL_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
 
-_ID_CAPTURE, _ID_QUIT, _ID_ESC = 1, 2, 3
+_ID_CAPTURE, _ID_QUIT, _ID_ESC, _ID_RECORD = 1, 2, 3, 4
 
 _MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "shift": MOD_SHIFT,
               "alt": MOD_ALT, "win": MOD_WIN, "super": MOD_WIN}
@@ -245,6 +231,7 @@ _NAMED_KEYS.update({f"f{i}": 0x6F + i for i in range(1, 25)})   # f1 = 0x70
 # A distinct fallback per key: sharing one would make a typo in HOTKEY_QUIT
 # collide with the capture hotkey, so quit would fail to register as well.
 _FALLBACK = {"capture": (MOD_CONTROL | MOD_SHIFT, 0x48),
+             "record": (MOD_CONTROL | MOD_SHIFT, 0x52),
              "quit": (MOD_CONTROL | MOD_SHIFT, 0x51)}
 
 
@@ -265,16 +252,6 @@ def sel_box(start, x, y, w, h):
     x1 = min(max(start[0], 0), w - 1)
     y1 = min(max(start[1], 0), h - 1)
     return (min(x1, x), min(y1, y), max(x1, x) + 1, max(y1, y) + 1)
-
-
-def next_free_path(out_dir, stamp, ext=".png"):
-    """First unused '<stamp>.png', '<stamp>_2.png', … in out_dir."""
-    path = out_dir / f"{stamp}{ext}"
-    seq = 2
-    while path.exists():  # a second shot within the same second
-        path = out_dir / f"{stamp}_{seq}{ext}"
-        seq += 1
-    return path
 
 
 def to_dib(img):
@@ -526,11 +503,6 @@ def _work_area():
     return None
 
 
-def _grab(sct, rect):
-    shot = sct.grab({k: rect[k] for k in ("left", "top", "width", "height")})
-    return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
-
 def _primary_monitor(sct):
     # The one flagged is_primary; otherwise the one at (0,0)
     return (next((m for m in sct.monitors[1:] if m.get("is_primary")), None)
@@ -645,6 +617,7 @@ class HotkeyManager:
         # same tick would replace each other and only the second would be seen.
         failed = []
         for spec, hid, what in ((HOTKEY_CAPTURE, _ID_CAPTURE, "capture"),
+                                (HOTKEY_RECORD, _ID_RECORD, "record"),
                                 (HOTKEY_QUIT, _ID_QUIT, "quit")):
             mods, vk = parse_hotkey(spec, _FALLBACK[what])
             if not _U32.RegisterHotKey(None, hid, mods, vk):
@@ -666,6 +639,8 @@ class HotkeyManager:
                     self.events.put(("capture", None))
                 elif hid == _ID_QUIT:
                     self.events.put(("quit", None))
+                elif hid == _ID_RECORD:
+                    self.events.put(("record", None))
                 elif hid == _ID_ESC:
                     self.events.put(("cancel", None))
             elif m == _WM_REG_ESC:
@@ -678,6 +653,7 @@ class HotkeyManager:
                 break
         _U32.UnregisterHotKey(None, _ID_CAPTURE)
         _U32.UnregisterHotKey(None, _ID_QUIT)
+        _U32.UnregisterHotKey(None, _ID_RECORD)
         _U32.UnregisterHotKey(None, _ID_ESC)
 
     def _post(self, message):
@@ -704,7 +680,7 @@ def _single_instance_or_exit():
     # exists but couldn't be opened (e.g. an elevated copy) — both mean
     # "already running"
     if err == 183 or (not handle and err == 5):
-        if TELL_IF_RUNNING:
+        if TELL_IF_RUNNING and "--background" not in sys.argv:
             # PyShot has no window and no tray icon, so a second launch is the
             # only moment it can answer "is it already running?"
             _U32.MessageBoxW(
@@ -715,17 +691,9 @@ def _single_instance_or_exit():
                 f"Startup settings: {_launch_cmd()} --startup",
                 "PyShot", 0x40)
         sys.exit(0)
+    if not handle:
+        raise ctypes.WinError(err)
     return handle
-
-
-def _desktop_dir():
-    # Shell API instead of Path.home()/"Desktop": also correctly finds a desktop
-    # that has been moved to OneDrive.
-    CSIDL_DESKTOPDIRECTORY = 0x0010
-    buf = ctypes.create_unicode_buffer(260)
-    if ctypes.windll.shell32.SHGetFolderPathW(None, CSIDL_DESKTOPDIRECTORY, None, 0, buf) == 0:
-        return Path(buf.value)
-    return Path.home() / "Desktop"
 
 
 def _shots_dir():
@@ -886,7 +854,7 @@ def _is_running():
     if h:
         _K32.CloseHandle(h)
         return True
-    return False
+    return ctypes.get_last_error() == 5
 
 
 def _signal_quit():
@@ -895,9 +863,10 @@ def _signal_quit():
     h = _K32.OpenEventW(EVENT_MODIFY_STATE, False, QUIT_EVENT_NAME)
     if not h:
         return False
-    _K32.SetEvent(h)
-    _K32.CloseHandle(h)
-    return True
+    try:
+        return bool(_K32.SetEvent(h))
+    finally:
+        _K32.CloseHandle(h)
 
 
 def _startup_dialog():
@@ -942,7 +911,7 @@ def _startup_dialog():
                 # Don't trust the 'running' snapshot: the state may have changed
                 # while the dialog was open; if nobody is running it returns False anyway.
                 if _signal_quit():
-                    result += "\nThe running copy was closed."
+                    result += "\nThe running copy was asked to close (active video is finalized first)."
                 elif _is_running():
                     result += ("\nThe running copy could NOT be closed — press "
                                f"{pretty_hotkey(HOTKEY_QUIT)}, or try again as "
@@ -1381,10 +1350,11 @@ class PyShot:
         self.editor = None          # the Annotator, while the edit phase is on screen
         self._hint_text = ""
         self._ignore_press_until = 0.0  # see _begin_edit: a double-click's second half
+        self._selection_callback = None
 
     # ---- capture flow (always called from the main/tkinter thread) ----
 
-    def start_capture(self):
+    def start_capture(self, selection_callback=None, monitor=None):
         if self.active:
             if self.top is not None and self.top.winfo_exists():
                 return          # a real overlay is already up
@@ -1393,6 +1363,7 @@ class PyShot:
             # refusing every capture until the next Esc.
             self._close_overlay()
         self.active = True
+        self._selection_callback = selection_callback
         try:
             # If the previous shot's toast is still on screen, don't let it enter the new frame
             if self._kill_toast():
@@ -1402,7 +1373,12 @@ class PyShot:
             # must stay lazy — `getattr(mss, "MSS", mss.mss)` would evaluate the
             # legacy name eagerly and raise once upstream drops it.
             with (getattr(mss, "MSS", None) or mss.mss)() as sct:
-                self.mon, self.img = _capture(sct)
+                if monitor is None:
+                    self.mon, self.img = _capture(sct)
+                else:
+                    self.mon = {"left": monitor["x"], "top": monitor["y"],
+                                "width": monitor["width"], "height": monitor["height"]}
+                    self.img = _grab(sct, self.mon)
             # Enumerated AFTER the grab and BEFORE the overlay exists, so
             # PyShot's own topmost window is never a snap candidate.
             self.win_rects = _window_rects() if WINDOW_SNAP else []
@@ -1441,6 +1417,8 @@ class PyShot:
         if ANNOTATE:
             hint += "  •  T: annotate"
         hint += "  •  Esc / right-click: cancel"
+        if self._selection_callback is not None:
+            hint = "Drag to select a video region  •  Esc / right-click to cancel"
         self._hint_text = hint
         self.hint_id = cv.create_text(w // 2, 28, text=hint,
                                       fill="#e0e0e0", font=("Segoe UI", 12))
@@ -1486,7 +1464,7 @@ class PyShot:
         top.bind("<Button-3>", self._cancel)
         top.bind("<KeyPress-c>", self._copy_colour)
         top.bind("<KeyPress-C>", self._copy_colour)
-        if ANNOTATE:
+        if ANNOTATE and self._selection_callback is None:
             top.bind("<KeyPress-t>", self._toggle_annotate)
             top.bind("<KeyPress-T>", self._toggle_annotate)
         # Alt+F4 would otherwise let Tk destroy the overlay behind our back,
@@ -1690,6 +1668,13 @@ class PyShot:
         if self.annotate:
             self._begin_edit(box, clicked)
             return
+        if self._selection_callback is not None:
+            callback = self._selection_callback
+            rect = {"x": self.mon["left"] + box[0], "y": self.mon["top"] + box[1],
+                    "width": box[2] - box[0], "height": box[3] - box[1]}
+            self._close_overlay()
+            self.root.after(150, lambda: callback(rect))
+            return
         region = self.img.crop(box)
         self._close_overlay()
         self.root.update_idletasks()  # make the overlay disappear instantly, then save
@@ -1789,7 +1774,7 @@ class PyShot:
             self.editor.on_press(e)
 
     def _toggle_annotate(self, event=None):
-        if self.cv is None or self.editor is not None:
+        if self.cv is None or self.editor is not None or self._selection_callback is not None:
             return
         if event is not None and event.state & _TK_CTRL_ALT:
             return                      # Ctrl+T / Alt+T belong to other apps, as with C
@@ -1802,6 +1787,8 @@ class PyShot:
         self._schedule_render()
 
     def _copy_colour(self, event=None):
+        if self._selection_callback is not None:
+            return
         if not LOUPE or self.img is None or self._cursor is None:
             return
         if self.start is not None:
@@ -1834,6 +1821,7 @@ class PyShot:
         self._close_overlay()
 
     def _close_overlay(self):
+        self._selection_callback = None
         if self.editor is not None:
             self.editor.destroy()
             self.editor = None
@@ -1931,14 +1919,18 @@ class PyShot:
 
 
 def main():
-    _single_instance_or_exit()
+    from pyshot_core.service import Service
+    from pyshot_core.rpc import BrokerServer
+    from pyshot_core.recording_ui import RecordingUI
+    mutex = _single_instance_or_exit()
     if _DPI_LEVEL != "per-monitor-v2":
         # Logged only when degraded, so "the capture looks blurry" has something
         # to read and a healthy system still writes nothing.
         _log_msg(f"DPI awareness: {_DPI_LEVEL} (Per-Monitor v2 unavailable) — "
                  "captures can look scaled on a HiDPI display.")
     # If the file was moved, silently update the startup shortcut to the current path
-    _sync_startup_path()
+    if "--background" not in sys.argv:
+        _sync_startup_path()
     # --startup "remove completely" can close us by signaling this event
     quit_event = _K32.CreateEventW(None, False, False, QUIT_EVENT_NAME)
     if quit_event and ctypes.get_last_error() == 183:
@@ -1956,10 +1948,21 @@ def main():
     hotkeys = HotkeyManager(events)
     hotkeys.start()
     app = PyShot(root, hotkeys)
+    service = Service()
+    broker = BrokerServer(service)
+    broker.start()
+    recorder = RecordingUI(app, service, events)
+    shutdown_started = False
 
     def dispatch(kind, payload):
+        if shutdown_started and kind != "callback":
+            return
         if kind == "capture":
             app.start_capture()
+        elif kind == "record":
+            recorder.toggle()
+        elif kind == "callback":
+            payload()
         elif kind == "cancel":
             if app.active:
                 app.escape()
@@ -1987,6 +1990,7 @@ def main():
                 _log_error()    # one bad event must not drop the rest
 
     def poll():
+        nonlocal shutdown_started
         # Anything escaping this body would stop the re-arm below for good,
         # leaving a live process that ignores every hotkey — so nothing may escape.
         keep = True
@@ -1995,13 +1999,24 @@ def main():
         except Exception:
             _log_error()
         if not keep:
-            hotkeys.stop()
-            root.destroy()
-            return
+            if not shutdown_started:
+                shutdown_started = True
+                hotkeys.stop()
+                app._close_overlay()
+                def shutdown():
+                    try:
+                        broker.close()
+                    except Exception:
+                        _log_error()
+                    events.put(("callback", root.destroy))
+                threading.Thread(target=shutdown, daemon=True).start()
         root.after(POLL_MS, poll)
 
     root.after(POLL_MS, poll)
     root.mainloop()
+    if quit_event:
+        _K32.CloseHandle(quit_event)
+    _K32.CloseHandle(mutex)
 
 
 USAGE = f"""PyShot {__version__} — background screenshot tool
@@ -2013,7 +2028,8 @@ USAGE = f"""PyShot {__version__} — background screenshot tool
   {_launch_cmd()} --help
       this message
 
-{pretty_hotkey(HOTKEY_CAPTURE)} captures, {pretty_hotkey(HOTKEY_QUIT)} quits.
+{pretty_hotkey(HOTKEY_CAPTURE)} captures, {pretty_hotkey(HOTKEY_RECORD)} records/stops,
+{pretty_hotkey(HOTKEY_QUIT)} quits.
 Errors are logged to %TEMP%\\pyshot.log"""
 
 
@@ -2024,6 +2040,8 @@ if __name__ == "__main__":
             _startup_dialog()
         elif _arg in ("-h", "--help", "/?"):
             _tell(USAGE)
+        elif _arg == "--background":
+            main()
         elif _arg:
             # Without this, a typo silently started an invisible daemon — or
             # exited 0 with no output because the mutex was already held.

@@ -1,0 +1,20 @@
+[project]
+name = "pyshot"
+version = "3.0.0"
+description = "Local Windows screenshots, native video recording and MCP tools"
+requires-python = ">=3.11"
+dependencies = [
+    "mss==10.2.0",
+    "Pillow==12.3.0",
+    "pywin32==312; sys_platform == 'win32'",
+    "mcp==2.3.0",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.17.0", "pyinstaller==6.22.3"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

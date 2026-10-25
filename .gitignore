@@ -5,6 +5,8 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv313/
+native/pyshot-recorder/target/
 venv/
 env/
 ENV/
@@ -16,6 +18,7 @@ dist/
 # ...except the committed build recipe (a trailing comment on a gitignore
 # pattern is NOT a comment, so this negation gets its own line)
 !pyshot.spec
+!pyshot-mcp.spec
 *.egg-info/
 .eggs/
 

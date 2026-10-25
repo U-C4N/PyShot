@@ -70,6 +70,25 @@ def test_the_hint_advertises_t(app):
     assert "T: annotate" in app.cv.itemcget(app.hint_id, "text")
 
 
+def test_video_selection_returns_physical_region_without_image_delivery(app, monkeypatch):
+    selected = []
+    app.mon["left"], app.mon["top"] = -1920, -200
+    app._selection_callback = selected.append
+    original_after = app.root.after
+    def after(delay, callback=None, *args):
+        if delay == 150:
+            callback(*args)
+            return None
+        return original_after(delay, callback, *args)
+    monkeypatch.setattr(app.root, "after", after)
+    app._toggle_annotate(ev())
+    assert not app.annotate
+    select(app, (10, 20), (110, 120))
+    assert selected == [{"x": -1910, "y": -180, "width": 101, "height": 101}]
+    assert app.delivered == []
+    assert not app.active
+
+
 def test_annotate_off_leaves_t_unbound_and_unadvertised(tk_root, quiet, monkeypatch):
     monkeypatch.setattr(pyshot, "ANNOTATE", False)
     shot = pyshot.PyShot(tk_root, FakeHotkeys())
