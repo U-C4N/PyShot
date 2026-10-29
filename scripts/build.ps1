@@ -12,8 +12,10 @@ try {
     & $Python -m PyInstaller --noconfirm pyshot-mcp.spec
     if ($LASTEXITCODE) { throw "MCP build failed" }
     $bundle = Join-Path $repoRoot "dist/PyShot-3.0.0-win-x64"
+    if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $bundle | Out-Null
-    Copy-Item -LiteralPath "dist/PyShot.exe", "dist/pyshot-mcp.exe", "native/pyshot-recorder/target/release/pyshot-recorder.exe", "LICENSE", "README.md" -Destination $bundle
+    Copy-Item -Path "dist/PyShot/*" -Destination $bundle -Recurse
+    Copy-Item -LiteralPath "dist/pyshot-mcp.exe", "native/pyshot-recorder/target/release/pyshot-recorder.exe", "LICENSE", "README.md" -Destination $bundle
     $pythonRuntime = & $Python -c "import sys; print(sys.base_prefix)"
     foreach ($runtimeName in @("vcruntime140.dll", "vcruntime140_1.dll")) {
         $runtimePath = Join-Path $pythonRuntime $runtimeName

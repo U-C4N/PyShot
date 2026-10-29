@@ -14,7 +14,7 @@
 
 ## Quick start
 
-Extract the complete `PyShot-3.0.0-win-x64.zip` bundle into a permanent folder and run `PyShot.exe`. Keep all EXE and DLL files together. The bundle includes Python and the native recorder; users do not install Python, Rust or FFmpeg. When upgrading from 2.x, close the old process with `Ctrl+Shift+Q` before launching 3.0.
+Extract the complete `PyShot-3.0.0-win-x64.zip` bundle into a permanent folder and run `PyShot.exe`. Keep all files and the `_internal` folder together. The bundle includes Python and the native recorder; users do not install Python, Rust or FFmpeg. When upgrading from 2.x, close the old process with `Ctrl+Shift+Q` before launching 3.0.
 
 From source (screenshot support; build the native helper below for video):
 

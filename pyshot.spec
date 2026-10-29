@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# Build one self-contained PyShot.exe (no Python installation needed):
+# Build a self-contained PyShot folder (no Python installation needed):
 #
 #     pip install pyinstaller
 #     pyinstaller pyshot.spec
-#     → dist\PyShot.exe
+#     → dist\PyShot\PyShot.exe + dist\PyShot\_internal
+#
+# One-folder, not one-file: a one-file exe unpacks ~20 MB into %TEMP% on every
+# launch (and Defender rescans it), which delayed the hotkeys by several
+# seconds after logon. UPX is off for the same reason.
 #
 # console=False is the .exe equivalent of launching with pythonw: no black
 # console window ever appears. Requires PyInstaller 6 or newer.
@@ -30,16 +34,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='PyShot',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -47,3 +48,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='PyShot')
