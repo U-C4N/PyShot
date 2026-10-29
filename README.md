@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.0.0-blue.svg" alt="Version 3.0.0">
+  <img src="https://img.shields.io/badge/version-3.0.1-blue.svg" alt="Version 3.0.1">
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platform-Windows-0078D6.svg" alt="Windows">
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT license">
@@ -14,7 +14,7 @@
 
 ## Quick start
 
-Extract the complete `PyShot-3.0.0-win-x64.zip` bundle into a permanent folder and run `PyShot.exe`. Keep all files and the `_internal` folder together. The bundle includes Python and the native recorder; users do not install Python, Rust or FFmpeg. When upgrading from 2.x, close the old process with `Ctrl+Shift+Q` before launching 3.0.
+Extract the complete `PyShot-3.0.1-win-x64.zip` bundle into a permanent folder and run `PyShot.exe`. Keep all files and the `_internal` folder together. The bundle includes Python and the native recorder; users do not install Python, Rust or FFmpeg. When upgrading from 2.x, close the old process with `Ctrl+Shift+Q` before launching 3.0.
 
 From source (screenshot support; build the native helper below for video):
 
@@ -29,7 +29,11 @@ This installs the locked dependencies and starts PyShot silently in the backgrou
 
 > Windows 10 1903+ or Windows 11, x64. Source usage needs Python 3.11+. Packaging uses Python 3.13. Windows N editions need Microsoft's Media Feature Pack.
 
-## What's new in 3.0.0
+## What's new in 3.0.1
+
+- **Instant hotkeys after logon:** `PyShot.exe` now ships as a folder (`_internal` next to it) instead of one self-extracting file, so it starts in about a second instead of four and no longer leaves `_MEI*` folders in `%TEMP%`.
+
+## 3.0.0
 
 - **Native video:** Windows Graphics Capture and Media Foundation write H.264/AAC MP4 at 30 FPS. Select a region, monitor or window; audio defaults to off.
 - **Local MCP:** nine tools for Codex CLI and Claude Code, including screenshots, video status and extracted video frames. Clients share the same PyShot process and recording.
@@ -145,7 +149,7 @@ py -3.13 -m venv .venv
 .\scripts\build.ps1 -Python .\.venv\Scripts\python.exe
 ```
 
-The build machine needs Rust with the MSVC toolchain and Visual Studio C++ Build Tools/Windows SDK. This builds `dist\PyShot-3.0.0-win-x64.zip` with a windowless GUI, a console MCP adapter and a native recorder. `PyShot.exe --startup` and `PyShot.exe --help` work like the script. Settings are baked in at build time. `Cargo.lock`, `uv.lock` and hash-locked Python requirements make dependencies reproducible.
+The build machine needs Rust with the MSVC toolchain and Visual Studio C++ Build Tools/Windows SDK. This builds `dist\PyShot-3.0.1-win-x64.zip` with a windowless GUI, a console MCP adapter and a native recorder. `PyShot.exe --startup` and `PyShot.exe --help` work like the script. Settings are baked in at build time. `Cargo.lock`, `uv.lock` and hash-locked Python requirements make dependencies reproducible.
 
 To build only the recorder for source usage:
 

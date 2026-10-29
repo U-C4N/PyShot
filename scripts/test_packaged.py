@@ -64,7 +64,7 @@ class MCP:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", type=Path, default=Path("dist/PyShot-3.0.0-win-x64"))
+    parser.add_argument("--bundle", type=Path, default=Path("dist/PyShot-3.0.1-win-x64"))
     options = parser.parse_args()
     executable = (options.bundle / "pyshot-mcp.exe").resolve()
     env = dict(os.environ)

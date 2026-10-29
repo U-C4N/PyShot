@@ -340,7 +340,7 @@ fn run() -> Result<()> {
     let _runtime = Runtime::new().context("Windows Media Foundation is unavailable")?;
     match args.first().map(String::as_str) {
         Some("capabilities") => emit(
-            json!({"version":"3.0.0","engine":"windows-graphics-capture/media-foundation","available":windows::Graphics::Capture::GraphicsCaptureSession::IsSupported().unwrap_or(false),"video_codec":"h264","audio_codec":"aac","container":"mp4","fps":30,"targets":["monitor","window","region"],"audio":["none","microphone","system","both"],"pause":false}),
+            json!({"version":"3.0.1","engine":"windows-graphics-capture/media-foundation","available":windows::Graphics::Capture::GraphicsCaptureSession::IsSupported().unwrap_or(false),"video_codec":"h264","audio_codec":"aac","container":"mp4","fps":30,"targets":["monitor","window","region"],"audio":["none","microphone","system","both"],"pause":false}),
         ),
         Some("audio-devices") => emit(audio::enumerate_devices().map_err(|e| anyhow!(e))?),
         Some("record") => record(),

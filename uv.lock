@@ -730,7 +730,7 @@ crypto = [
 
 [[package]]
 name = "pyshot"
-version = "3.0.0"
+version = "3.0.1"
 source = { virtual = "." }
 dependencies = [
     { name = "mcp" },

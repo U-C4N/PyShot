@@ -1,6 +1,6 @@
 [project]
 name = "pyshot"
-version = "3.0.0"
+version = "3.0.1"
 description = "Local Windows screenshots, native video recording and MCP tools"
 requires-python = ">=3.11"
 dependencies = [

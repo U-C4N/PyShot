@@ -11,7 +11,7 @@ try {
     if ($LASTEXITCODE) { throw "GUI build failed" }
     & $Python -m PyInstaller --noconfirm pyshot-mcp.spec
     if ($LASTEXITCODE) { throw "MCP build failed" }
-    $bundle = Join-Path $repoRoot "dist/PyShot-3.0.0-win-x64"
+    $bundle = Join-Path $repoRoot "dist/PyShot-3.0.1-win-x64"
     if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $bundle | Out-Null
     Copy-Item -Path "dist/PyShot/*" -Destination $bundle -Recurse
@@ -34,6 +34,6 @@ try {
     Get-ChildItem -LiteralPath $bundle -File | Where-Object { $_.Extension -in @('.exe', '.dll') } | Get-FileHash -Algorithm SHA256 |
         ForEach-Object { "$($_.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_.Path))" } |
         Set-Content -LiteralPath (Join-Path $bundle "SHA256SUMS.txt") -Encoding utf8
-    Compress-Archive -Path "$bundle/*" -DestinationPath "dist/PyShot-3.0.0-win-x64.zip" -Force
-    Write-Output "Built dist/PyShot-3.0.0-win-x64.zip"
+    Compress-Archive -Path "$bundle/*" -DestinationPath "dist/PyShot-3.0.1-win-x64.zip" -Force
+    Write-Output "Built dist/PyShot-3.0.1-win-x64.zip"
 } finally { Pop-Location }

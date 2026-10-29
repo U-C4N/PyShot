@@ -108,7 +108,7 @@ def tool_evidence(client, stdout):
 
 def server_launch(path):
     if path is None:
-        bundle = ROOT / "dist/PyShot-3.0.0-win-x64/pyshot-mcp.exe"
+        bundle = ROOT / "dist/PyShot-3.0.1-win-x64/pyshot-mcp.exe"
         path = bundle if bundle.is_file() else ROOT / "pyshot_mcp.py"
     path = Path(path).resolve()
     if not path.is_file():

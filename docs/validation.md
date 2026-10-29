@@ -7,7 +7,7 @@ python -m pytest -q
 python -m ruff check .
 cargo test --locked --manifest-path native/pyshot-recorder/Cargo.toml
 .\scripts\build.ps1
-python scripts/smoke_mcp.py dist/PyShot-3.0.0-win-x64/pyshot-mcp.exe
+python scripts/smoke_mcp.py dist/PyShot-3.0.1-win-x64/pyshot-mcp.exe
 ```
 
 Python regressions cover annotation/editing behavior, failed DPI HRESULT/BOOL calls, access-denied mutex detection, failed SetEvent, negative physical coordinates, real named-pipe ownership, single-recording conflicts, old-ID protection, repeated/concurrent stop, 20 controller cycles, MCP old/new protocol, image results and isolated idempotent CLI setup. The controller tests use a subprocess protocol fixture; they do not prove native media quality.
@@ -60,7 +60,7 @@ Reproducible opt-in hardware scripts:
 python scripts/test_native_video.py --stress
 python scripts/test_native_audio.py
 python scripts/test_packaged.py
-python scripts/test_cli_clients.py --server dist/PyShot-3.0.0-win-x64/pyshot-mcp.exe --tool-calls --clients codex,claude
+python scripts/test_cli_clients.py --server dist/PyShot-3.0.1-win-x64/pyshot-mcp.exe --tool-calls --clients codex,claude
 ```
 
 Close an older PyShot version before the packaged test so the test can start the packaged broker. Native scripts retain evidence under `%TEMP%`; package/CLI scripts write reports under ignored `build/`. Native audio tests open real default devices; packaged tests capture their own synthetic window. The package test intentionally leaves the broker running.
